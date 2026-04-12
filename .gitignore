@@ -1,5 +1,5 @@
 node_modules/
 dist/
 *.tsbuildinfo
-*.md
+plan-*.md
 .DS_Store

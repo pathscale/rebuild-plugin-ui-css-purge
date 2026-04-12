@@ -17,8 +17,8 @@
   "files": ["dist", "src/generate-manifest.ts"],
   "dependencies": {
     "@swc/core": "^1.15.24",
-    "postcss": "^8.5.9",
-    "purgecss": "^8.0.0"
+    "lightningcss": "^1.32.0",
+    "postcss": "^8.5.9"
   },
   "scripts": {
     "build": "bun run build.ts",
