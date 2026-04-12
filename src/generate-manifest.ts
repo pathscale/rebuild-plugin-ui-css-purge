@@ -1,7 +1,7 @@
 /**
  * Lib-side database generator.
  *
- * Reads all `*.classnames.ts` files from @pathscale/ui's component tree
+ * Reads all `*.classes.ts` files from @pathscale/ui's component tree
  * and produces a `purge-manifest.json` that the consumer-side plugin uses
  * to build safelists.
  *
@@ -115,10 +115,10 @@ async function main() {
   }
 
   componentsDir = path.resolve(componentsDir);
-  console.log(`Scanning ${componentsDir} for *.classnames.ts files…`);
+  console.log(`Scanning ${componentsDir} for *.classes.ts files…`);
 
   const manifest: PurgeManifest = {};
-  const glob = new Glob("**/*.classnames.ts");
+  const glob = new Glob("**/*.classes.ts");
 
   for await (const relPath of glob.scan({ cwd: componentsDir })) {
     const fullPath = path.join(componentsDir, relPath);
@@ -131,7 +131,7 @@ async function main() {
       continue;
     }
 
-    const fileName = path.basename(relPath, ".classnames.ts");
+    const fileName = path.basename(relPath, ".classes.ts");
 
     if (isCompound(CLASSES as Record<string, unknown>)) {
       for (const [partName, partObj] of Object.entries(CLASSES as Record<string, unknown>)) {
