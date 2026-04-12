@@ -10,7 +10,10 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "bin": {
+    "generate-manifest": "src/generate-manifest.ts"
+  },
+  "files": ["dist", "src/generate-manifest.ts"],
   "dependencies": {
     "@swc/core": "^1.15.24",
     "fast-glob": "^3.3.3",
