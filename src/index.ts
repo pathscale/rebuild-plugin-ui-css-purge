@@ -1,2 +1,2 @@
-export { pluginCssPurge } from "./rsbuild-plugin";
-export type { CssPurgeOptions } from "./rsbuild-plugin";
+export { extractUIImports, extractJSXUsages, buildSafelists, scanConsumerSource } from "./scan-consumer";
+export type { PropUsage, PurgeManifest, ComponentManifest, Safelists } from "./scan-consumer";

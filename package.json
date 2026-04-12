@@ -1,6 +1,6 @@
 {
   "name": "@pathscale/rebuild-plugin-ui-css-purge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,17 +11,14 @@
     }
   },
   "bin": {
+    "rebuild-plugin-ui-css-purge": "dist/postbuild-purge.js",
     "generate-manifest": "src/generate-manifest.ts"
   },
   "files": ["dist", "src/generate-manifest.ts"],
   "dependencies": {
     "@swc/core": "^1.15.24",
-    "fast-glob": "^3.3.3",
     "postcss": "^8.5.9",
     "purgecss": "^8.0.0"
-  },
-  "peerDependencies": {
-    "@rsbuild/core": "^1.7.5"
   },
   "scripts": {
     "build": "bun run build.ts",
@@ -29,7 +26,6 @@
     "format": "biome format . --write"
   },
   "devDependencies": {
-    "@rsbuild/core": "^1.7.5",
     "bun-types": "^1.3.12"
   }
 }

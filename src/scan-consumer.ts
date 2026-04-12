@@ -242,7 +242,30 @@ function getUsedEnumValues(slotName: string, usages: PropUsage[]): Set<string> |
   return values;
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────────
+// ── Consumer source scanning ───────────────────────────────────────────────────
+
+async function scanConsumerSource(srcDir: string): Promise<PropUsage[]> {
+  const allUsages: PropUsage[] = [];
+  const glob = new Glob("**/*.{tsx,ts,jsx,js}");
+
+  for await (const relPath of glob.scan({ cwd: srcDir })) {
+    if (relPath.includes("node_modules")) continue;
+    const fullPath = path.join(srcDir, relPath);
+    const code = await Bun.file(fullPath).text();
+    if (!code.includes("@pathscale/ui")) continue;
+
+    const isTsx = /\.[tj]sx$/.test(relPath);
+    const ast = await swc.parse(code, { syntax: "typescript", tsx: isTsx });
+    const uiImports = extractUIImports(ast);
+    if (uiImports.size === 0) continue;
+
+    allUsages.push(...extractJSXUsages(ast, uiImports));
+  }
+
+  return allUsages;
+}
+
+// ── Main (standalone CLI) ─────────────────────────────────────────────────────
 
 async function main() {
   const [srcDir, manifestPath] = process.argv.slice(2);
@@ -258,38 +281,8 @@ async function main() {
   console.log(`Scanning ${resolvedSrc} for @pathscale/ui component usage…`);
   console.log(`Manifest: ${Object.keys(manifest).length} entries\n`);
 
-  const allUsages: PropUsage[] = [];
-  const glob = new Glob("**/*.{tsx,ts,jsx,js}");
-  let fileCount = 0;
-
-  for await (const relPath of glob.scan({ cwd: resolvedSrc })) {
-    if (relPath.includes("node_modules")) continue;
-
-    const fullPath = path.join(resolvedSrc, relPath);
-    const code = await Bun.file(fullPath).text();
-
-    if (!code.includes("@pathscale/ui")) continue;
-
-    const isTsx = /\.[tj]sx$/.test(relPath);
-    const ast = await swc.parse(code, {
-      syntax: "typescript",
-      tsx: isTsx,
-    });
-
-    const uiImports = extractUIImports(ast);
-    if (uiImports.size === 0) continue;
-
-    const usages = extractJSXUsages(ast, uiImports);
-    if (usages.length > 0) {
-      fileCount++;
-      console.log(`  ${relPath}: ${usages.length} usage(s) — [${usages.map(u => u.component).join(", ")}]`);
-      allUsages.push(...usages);
-    }
-  }
-
-  console.log(`\n${fileCount} files with UI component usages, ${allUsages.length} total usages\n`);
-
-  const { classSafelist, attrSafelist } = buildSafelists(allUsages, manifest);
+  const usages = await scanConsumerSource(resolvedSrc);
+  const { classSafelist, attrSafelist } = buildSafelists(usages, manifest);
 
   console.log("=== Class Safelist ===");
   for (const cls of [...classSafelist].sort()) {
@@ -302,11 +295,12 @@ async function main() {
   }
 
   console.log(`\nTotal: ${classSafelist.size} classes, ${attrSafelist.size} attribute selectors`);
-
-  return { classSafelist, attrSafelist };
 }
 
-main();
+// Only run CLI when invoked directly (not when imported as a module)
+if (import.meta.main) {
+  main();
+}
 
-export { extractUIImports, extractJSXUsages, buildSafelists };
+export { extractUIImports, extractJSXUsages, buildSafelists, scanConsumerSource };
 export type { PropUsage, PurgeManifest, ComponentManifest, Safelists };

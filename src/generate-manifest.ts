@@ -152,4 +152,6 @@ async function main() {
   console.log(`\nWrote ${outPath} (${Object.keys(manifest).length} entries, ${json.length} bytes)`);
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

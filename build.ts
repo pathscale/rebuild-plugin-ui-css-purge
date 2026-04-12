@@ -1,9 +1,9 @@
 await Bun.build({
-  entrypoints: ["src/index.ts"],
+  entrypoints: ["src/index.ts", "src/postbuild-purge.ts"],
   outdir: "dist",
-  target: "node",
+  target: "bun",
   format: "esm",
-  external: ["@rsbuild/core", "postcss", "purgecss", "@swc/core", "fast-glob"],
+  external: ["postcss", "purgecss", "@swc/core"],
   sourcemap: "inline",
 });
 
@@ -18,4 +18,4 @@ if (exitCode !== 0) {
   process.exit(exitCode);
 }
 
-console.log("Build complete: dist/index.js + type declarations");
+console.log("Build complete: dist/index.js + dist/postbuild-purge.js + type declarations");
