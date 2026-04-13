@@ -28,12 +28,18 @@ type PurgeManifest = Record<string, ComponentManifest>;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/** Flatten a class value (string or string[]) into an array of individual class names. */
+/** Flatten a class value (string, string[], or nested object) into an array of individual class names. */
 function flattenClasses(val: ClassValue): string[] {
   if (typeof val === "string") {
     return val.split(/\s+/).filter(Boolean);
   }
-  return (val as readonly string[]).flatMap((s) => s.split(/\s+/).filter(Boolean));
+  if (Array.isArray(val)) {
+    return val.flatMap((s) => typeof s === "string" ? s.split(/\s+/).filter(Boolean) : flattenClasses(s));
+  }
+  if (val !== null && typeof val === "object") {
+    return Object.values(val).flatMap((v) => flattenClasses(v as ClassValue));
+  }
+  return [];
 }
 
 /** Check if a value is a plain object (not array, not null). */
