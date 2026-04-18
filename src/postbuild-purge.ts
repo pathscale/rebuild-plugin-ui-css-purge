@@ -66,10 +66,23 @@ function collectClassesFromEntry(entry: { classes: { always: string[]; byProp: R
 }
 
 function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>): Set<string> {
-  // Group manifest entries by root component name
-  // e.g. "Calendar.Calendar" and "Calendar.Cell" both belong to "Calendar"
-  const componentClasses = new Map<string, string[]>();
+  // For each manifest entry, collect BEM root classes (from classes.always).
+  // A class is considered a BEM-owned class of a component if it matches
+  // one of its roots: exact match, root--, or root__.
+  // Everything else (Tailwind utilities like gap-1, flex-col) is never killed.
+  const componentBemRoots = new Map<string, Set<string>>();
 
+  for (const [key, entry] of Object.entries(manifest)) {
+    const root = key.split(".")[0];
+    const existing = componentBemRoots.get(root) ?? new Set();
+    for (const cls of entry.classes.always) {
+      existing.add(cls);
+    }
+    componentBemRoots.set(root, existing);
+  }
+
+  // Collect ALL classes per component
+  const componentClasses = new Map<string, string[]>();
   for (const [key, entry] of Object.entries(manifest)) {
     const root = key.split(".")[0];
     const existing = componentClasses.get(root) ?? [];
@@ -77,23 +90,46 @@ function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>)
     componentClasses.set(root, existing);
   }
 
-  // Classes from components that are NOT imported → safe to remove
+  // Filter: only include classes that match a BEM root of their component
+  function isBemClass(cls: string, bemRoots: Set<string>): boolean {
+    for (const root of bemRoots) {
+      if (cls === root || cls.startsWith(`${root}--`) || cls.startsWith(`${root}__`)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   const killList = new Set<string>();
-  // Classes from components that ARE imported → must never be removed
   const safeClasses = new Set<string>();
 
   for (const [component, classes] of componentClasses) {
+    const bemRoots = componentBemRoots.get(component) ?? new Set();
     if (importedComponents.has(component)) {
       for (const cls of classes) safeClasses.add(cls);
     } else {
-      for (const cls of classes) killList.add(cls);
+      // Only kill BEM-owned classes, not Tailwind utilities
+      for (const cls of classes) {
+        if (isBemClass(cls, bemRoots)) {
+          killList.add(cls);
+        }
+      }
     }
   }
 
-  // If a class appears in BOTH used and unused components (e.g. shared Tailwind
-  // utilities like 'relative'), it must NOT be killed
+  // If a class appears in BOTH used and unused components, keep it
   for (const cls of safeClasses) {
     killList.delete(cls);
+  }
+
+  // Never kill Tailwind utility classes even if a component lists them as base.
+  // These are shared across the entire app and must be preserved.
+  const twPatterns = /^(-?)(flex|grid|gap|items|justify|self|place|order|col|row|auto|basis|grow|shrink|space|overflow|relative|absolute|fixed|sticky|static|block|inline|hidden|visible|invisible|z|inset|top|right|bottom|left|float|clear|isolate|object|aspect|container|columns|break|box|display|table|caption|border|rounded|outline|ring|shadow|opacity|mix|bg|from|via|to|text|font|leading|tracking|indent|align|whitespace|word|hyphens|content|list|decoration|underline|overline|line|no-underline|uppercase|lowercase|capitalize|normal|italic|not-italic|antialiased|subpixel|truncate|w|h|min|max|p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|size|scroll|snap|touch|select|resize|cursor|caret|pointer|will|appearance|accent|transition|duration|delay|ease|animate|scale|rotate|translate|skew|transform|origin|filter|blur|brightness|contrast|drop|grayscale|hue|invert|saturate|sepia|backdrop|sr|forced|print|motion|lg|md|sm|xl|2xl|dark|hover|focus|active|disabled|first|last|odd|even|group|peer)($|[-:\[.])/;
+
+  for (const cls of killList) {
+    if (twPatterns.test(cls)) {
+      killList.delete(cls);
+    }
   }
 
   return killList;
