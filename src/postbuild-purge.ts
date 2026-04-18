@@ -50,22 +50,45 @@ function parseArgs(argv: string[]): { distDir: string; srcDir: string; manifestP
 // ── Extract all UI classes from manifest (the "universe" of purgeable classes) ─
 
 function extractAllManifestClasses(manifest: PurgeManifest): Set<string> {
-  const all = new Set<string>();
+  // Derive component prefixes from manifest entry names:
+  //   "Badge" → "badge", "Calendar.Calendar" → "calendar",
+  //   "ButtonGroup" → "button-group", "Accordion.Item" → "accordion"
+  const componentPrefixes = new Set<string>();
+  for (const key of Object.keys(manifest)) {
+    const root = key.split(".")[0];
+    const kebab = root.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
+    componentPrefixes.add(kebab);
+  }
 
+  // Collect all classes from the manifest
+  const allManifestClasses: string[] = [];
   for (const entry of Object.values(manifest)) {
-    for (const cls of entry.classes.always) all.add(cls);
+    allManifestClasses.push(...entry.classes.always);
     for (const value of Object.values(entry.classes.byProp)) {
       if (Array.isArray(value)) {
-        for (const cls of value) all.add(cls);
+        allManifestClasses.push(...value);
       } else {
         for (const classes of Object.values(value)) {
-          for (const cls of classes) all.add(cls);
+          allManifestClasses.push(...classes);
         }
       }
     }
   }
 
-  return all;
+  // Only include classes that match a component prefix (BEM naming).
+  // This excludes Tailwind utilities (flex-col, gap-1, items-center, etc.)
+  // that UI components embed in their class maps.
+  const ui = new Set<string>();
+  for (const cls of allManifestClasses) {
+    for (const prefix of componentPrefixes) {
+      if (cls === prefix || cls.startsWith(`${prefix}--`) || cls.startsWith(`${prefix}__`)) {
+        ui.add(cls);
+        break;
+      }
+    }
+  }
+
+  return ui;
 }
 
 // ── Level 1: class-level purge + keyframes + font-face + element selectors ───
