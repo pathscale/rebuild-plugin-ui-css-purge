@@ -47,6 +47,27 @@ function parseArgs(argv: string[]): { distDir: string; srcDir: string; manifestP
   return { distDir, srcDir, manifestPath };
 }
 
+// ── Extract all UI classes from manifest (the "universe" of purgeable classes) ─
+
+function extractAllManifestClasses(manifest: PurgeManifest): Set<string> {
+  const all = new Set<string>();
+
+  for (const entry of Object.values(manifest)) {
+    for (const cls of entry.classes.always) all.add(cls);
+    for (const value of Object.values(entry.classes.byProp)) {
+      if (Array.isArray(value)) {
+        for (const cls of value) all.add(cls);
+      } else {
+        for (const classes of Object.values(value)) {
+          for (const cls of classes) all.add(cls);
+        }
+      }
+    }
+  }
+
+  return all;
+}
+
 // ── Level 1: class-level purge + keyframes + font-face + element selectors ───
 
 function extractClassesFromSelector(selector: string): string[] {
@@ -86,10 +107,12 @@ function isKeepableNonClassSelector(sel: string): boolean {
   return false;
 }
 
-function purgeClasses(css: string, classSafelist: Set<string>): string {
+function purgeClasses(css: string, classSafelist: Set<string>, uiClassUniverse: Set<string>): string {
   const root = postcss.parse(css);
 
-  // Pass 1: purge style rules
+  // Pass 1: purge style rules — only remove selectors whose classes are
+  // ALL from the UI universe and NONE are safelisted.  Selectors that
+  // contain any non-UI class (Tailwind, app) are always kept.
   root.walkRules((rule) => {
     const selectors = rule.selectors;
     const kept: string[] = [];
@@ -103,6 +126,15 @@ function purgeClasses(css: string, classSafelist: Set<string>): string {
         }
         continue;
       }
+
+      // If any class is NOT a UI class → keep (it's app/Tailwind CSS)
+      const hasNonUIClass = classes.some((c) => !uiClassUniverse.has(c));
+      if (hasNonUIClass) {
+        kept.push(sel);
+        continue;
+      }
+
+      // All classes are UI classes — keep only if at least one is safelisted
       if (classes.some((c) => classSafelist.has(c))) {
         kept.push(sel);
       }
@@ -279,9 +311,10 @@ async function main() {
   const usages = await scanConsumerSource(srcDir);
   console.log(`[css-purge] Scanned ${srcDir}: ${usages.length} component usages`);
 
-  // 3. Build safelists
+  // 3. Build safelists + UI class universe
   const { classSafelist, attrSafelist } = buildSafelists(usages, manifest);
-  console.log(`[css-purge] Safelist: ${classSafelist.size} classes, ${attrSafelist.size} attrs`);
+  const uiClassUniverse = extractAllManifestClasses(manifest);
+  console.log(`[css-purge] UI universe: ${uiClassUniverse.size} classes, safelist: ${classSafelist.size} classes, ${attrSafelist.size} attrs`);
 
   // 4. Glob CSS files in dist
   const glob = new Glob("**/*.css");
@@ -296,8 +329,8 @@ async function main() {
 
     console.log(`[css-purge] Processing ${relPath} (${(originalSize / 1024).toFixed(1)} KB)`);
 
-    // Level 1: class-level purge
-    let purgedCss = purgeClasses(originalCss, classSafelist);
+    // Level 1: class-level purge (UI classes only)
+    let purgedCss = purgeClasses(originalCss, classSafelist, uiClassUniverse);
     const afterL1 = Buffer.byteLength(purgedCss, "utf-8");
     console.log(`[css-purge]   L1 class purge: ${(originalSize / 1024).toFixed(1)} → ${(afterL1 / 1024).toFixed(1)} KB`);
 
