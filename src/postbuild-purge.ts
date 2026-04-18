@@ -25,26 +25,28 @@ import type { PurgeManifest } from "./scan-consumer";
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
-function parseArgs(argv: string[]): { distDir: string; srcDir: string; manifestPath: string } {
+function parseArgs(argv: string[]): { distDir: string; srcDir: string; manifestPath: string; libDir: string } {
   const args = argv.slice(2);
   let distDir = "./dist";
   let srcDir = "./src";
   let manifestPath = "";
+  let libDir = "";
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--dist" && args[i + 1]) distDir = args[++i];
     else if (args[i] === "--src" && args[i + 1]) srcDir = args[++i];
     else if (args[i] === "--manifest" && args[i + 1]) manifestPath = args[++i];
+    else if (args[i] === "--lib" && args[i + 1]) libDir = args[++i];
   }
 
   if (!manifestPath) {
     console.error(
-      "Usage: bunx @pathscale/rebuild-plugin-ui-css-purge --manifest <path> [--dist <path>] [--src <path>]",
+      "Usage: bunx @pathscale/rebuild-plugin-ui-css-purge --manifest <path> [--dist <path>] [--src <path>] [--lib <path>]",
     );
     process.exit(1);
   }
 
-  return { distDir, srcDir, manifestPath };
+  return { distDir, srcDir, manifestPath, libDir };
 }
 
 // ── Build kill-list: classes from components that are never imported ──────────
@@ -124,6 +126,85 @@ async function scanImportedComponents(srcDir: string): Promise<Set<string>> {
   }
 
   return imported;
+}
+
+/**
+ * Scan the UI library source to build an internal dependency graph.
+ * Each component dir that imports from "../other-component" creates an edge.
+ * Returns a map: PascalName → Set<PascalName> of direct dependencies.
+ */
+async function scanLibDependencies(libComponentsDir: string): Promise<Map<string, Set<string>>> {
+  const deps = new Map<string, Set<string>>();
+  const glob = new Glob("**/*.{tsx,ts,js,mjs}");
+
+  // Map kebab dir names to PascalCase (e.g. "color-wheel-flower" → "ColorWheelFlower")
+  const { readdirSync } = await import("fs");
+  const dirs = readdirSync(libComponentsDir, { withFileTypes: true })
+    .filter((d: any) => d.isDirectory())
+    .map((d: any) => d.name);
+
+  function kebabToPascal(s: string): string {
+    return s.split("-").map((p: string) => p.charAt(0).toUpperCase() + p.slice(1)).join("");
+  }
+
+  const dirToPascal = new Map<string, string>();
+  for (const dir of dirs) {
+    dirToPascal.set(dir, kebabToPascal(dir));
+  }
+
+  for (const dir of dirs) {
+    const pascal = dirToPascal.get(dir)!;
+    const componentDeps = new Set<string>();
+    const scanDir = `${libComponentsDir}/${dir}`;
+
+    for await (const relPath of glob.scan({ cwd: scanDir })) {
+      const fullPath = `${scanDir}/${relPath}`;
+      const code = await Bun.file(fullPath).text();
+
+      // Match: from "../other-component" or from "../other-component/Something"
+      const importRegex = /from\s+["']\.\.\/([^/"']+)/g;
+      for (const match of code.matchAll(importRegex)) {
+        const depDir = match[1];
+        if (depDir === "types" || depDir === "utils" || depDir === "..") continue;
+        const depPascal = dirToPascal.get(depDir);
+        if (depPascal && depPascal !== pascal) {
+          componentDeps.add(depPascal);
+        }
+      }
+    }
+
+    if (componentDeps.size > 0) {
+      deps.set(pascal, componentDeps);
+    }
+  }
+
+  return deps;
+}
+
+/**
+ * Given directly imported components and a dependency graph,
+ * transitively resolve all components that are needed.
+ */
+function resolveTransitiveDeps(
+  imported: Set<string>,
+  depGraph: Map<string, Set<string>>,
+): Set<string> {
+  const resolved = new Set(imported);
+  const queue = [...imported];
+
+  while (queue.length > 0) {
+    const comp = queue.pop()!;
+    const deps = depGraph.get(comp);
+    if (!deps) continue;
+    for (const dep of deps) {
+      if (!resolved.has(dep)) {
+        resolved.add(dep);
+        queue.push(dep);
+      }
+    }
+  }
+
+  return resolved;
 }
 
 // ── Level 1: class-level purge + keyframes + font-face + element selectors ───
@@ -349,21 +430,36 @@ function minify(css: string): string {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const { distDir, srcDir, manifestPath } = parseArgs(process.argv);
+  const { distDir, srcDir, manifestPath, libDir } = parseArgs(process.argv);
 
   // 1. Load manifest
   const manifest: PurgeManifest = JSON.parse(
     await Bun.file(manifestPath).text(),
   );
-  console.log(`[css-purge] Manifest loaded: ${Object.keys(manifest).length} entries`);
+  const totalComponents = new Set(Object.keys(manifest).map(k => k.split(".")[0])).size;
+  console.log(`[css-purge] Manifest loaded: ${Object.keys(manifest).length} entries (${totalComponents} components)`);
 
-  // 2. Scan consumer source for imported components
-  const importedComponents = await scanImportedComponents(srcDir);
-  console.log(`[css-purge] Imported components: ${importedComponents.size} / ${new Set(Object.keys(manifest).map(k => k.split(".")[0])).size}`);
+  // 2. Scan consumer source for directly imported components
+  const directImports = await scanImportedComponents(srcDir);
+  console.log(`[css-purge] Direct imports from app: ${directImports.size} / ${totalComponents}`);
 
-  // 3. Build kill-list (classes from components never imported) + attr safelist
+  // 3. Resolve transitive dependencies (components used internally by imported ones)
+  let importedComponents = directImports;
+  if (libDir) {
+    // Try src/components first (local checkout), fall back to dist/components (npm package)
+    const { existsSync } = await import("fs");
+    const componentsDir = existsSync(`${libDir}/src/components`)
+      ? `${libDir}/src/components`
+      : `${libDir}/dist/components`;
+    const depGraph = await scanLibDependencies(componentsDir);
+    importedComponents = resolveTransitiveDeps(directImports, depGraph);
+    const transitive = importedComponents.size - directImports.size;
+    console.log(`[css-purge] Transitive deps: +${transitive} → ${importedComponents.size} total used components`);
+  }
+
+  // 4. Build kill-list (classes from components never imported) + attr safelist
   const killList = buildKillList(manifest, importedComponents);
-  console.log(`[css-purge] Kill-list: ${killList.size} classes from unused components`);
+  console.log(`[css-purge] Kill-list: ${killList.size} classes from ${totalComponents - importedComponents.size} unused components`);
 
   // Also scan for prop-level attr purging
   const usages = await scanConsumerSource(srcDir);
