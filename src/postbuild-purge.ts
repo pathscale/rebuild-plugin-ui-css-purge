@@ -47,48 +47,83 @@ function parseArgs(argv: string[]): { distDir: string; srcDir: string; manifestP
   return { distDir, srcDir, manifestPath };
 }
 
-// ── Extract all UI classes from manifest (the "universe" of purgeable classes) ─
+// ── Build kill-list: classes from components that are never imported ──────────
 
-function extractAllManifestClasses(manifest: PurgeManifest): Set<string> {
-  // Derive component prefixes from manifest entry names:
-  //   "Badge" → "badge", "Calendar.Calendar" → "calendar",
-  //   "ButtonGroup" → "button-group", "Accordion.Item" → "accordion"
-  const componentPrefixes = new Set<string>();
-  for (const key of Object.keys(manifest)) {
+function collectClassesFromEntry(entry: { classes: { always: string[]; byProp: Record<string, string[] | Record<string, string[]>> } }): string[] {
+  const result = [...entry.classes.always];
+  for (const value of Object.values(entry.classes.byProp)) {
+    if (Array.isArray(value)) {
+      result.push(...value);
+    } else {
+      for (const classes of Object.values(value)) {
+        result.push(...classes);
+      }
+    }
+  }
+  return result;
+}
+
+function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>): Set<string> {
+  // Group manifest entries by root component name
+  // e.g. "Calendar.Calendar" and "Calendar.Cell" both belong to "Calendar"
+  const componentClasses = new Map<string, string[]>();
+
+  for (const [key, entry] of Object.entries(manifest)) {
     const root = key.split(".")[0];
-    const kebab = root.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
-    componentPrefixes.add(kebab);
+    const existing = componentClasses.get(root) ?? [];
+    existing.push(...collectClassesFromEntry(entry));
+    componentClasses.set(root, existing);
   }
 
-  // Collect all classes from the manifest
-  const allManifestClasses: string[] = [];
-  for (const entry of Object.values(manifest)) {
-    allManifestClasses.push(...entry.classes.always);
-    for (const value of Object.values(entry.classes.byProp)) {
-      if (Array.isArray(value)) {
-        allManifestClasses.push(...value);
-      } else {
-        for (const classes of Object.values(value)) {
-          allManifestClasses.push(...classes);
+  // Classes from components that are NOT imported → safe to remove
+  const killList = new Set<string>();
+  // Classes from components that ARE imported → must never be removed
+  const safeClasses = new Set<string>();
+
+  for (const [component, classes] of componentClasses) {
+    if (importedComponents.has(component)) {
+      for (const cls of classes) safeClasses.add(cls);
+    } else {
+      for (const cls of classes) killList.add(cls);
+    }
+  }
+
+  // If a class appears in BOTH used and unused components (e.g. shared Tailwind
+  // utilities like 'relative'), it must NOT be killed
+  for (const cls of safeClasses) {
+    killList.delete(cls);
+  }
+
+  return killList;
+}
+
+async function scanImportedComponents(srcDir: string): Promise<Set<string>> {
+  const imported = new Set<string>();
+  const glob = new Glob("**/*.{tsx,ts,jsx,js}");
+
+  for await (const relPath of glob.scan({ cwd: srcDir })) {
+    if (relPath.includes("node_modules")) continue;
+    const fullPath = `${srcDir}/${relPath}`;
+    const code = await Bun.file(fullPath).text();
+    if (!code.includes("@pathscale/ui")) continue;
+
+    // Match: import { Foo, Bar as Baz } from "@pathscale/ui"
+    const importRegex = /import\s*\{([^}]+)\}\s*from\s*['"]@pathscale\/ui['"]/g;
+    for (const match of code.matchAll(importRegex)) {
+      const specifiers = match[1].split(",");
+      for (const spec of specifiers) {
+        const trimmed = spec.trim();
+        if (trimmed.startsWith("type ")) continue;
+        // Handle "Foo as Bar" → take "Foo"
+        const name = trimmed.split(/\s+as\s+/)[0].trim();
+        if (name && /^[A-Z]/.test(name)) {
+          imported.add(name);
         }
       }
     }
   }
 
-  // Only include classes that match a component prefix (BEM naming).
-  // This excludes Tailwind utilities (flex-col, gap-1, items-center, etc.)
-  // that UI components embed in their class maps.
-  const ui = new Set<string>();
-  for (const cls of allManifestClasses) {
-    for (const prefix of componentPrefixes) {
-      if (cls === prefix || cls.startsWith(`${prefix}--`) || cls.startsWith(`${prefix}__`)) {
-        ui.add(cls);
-        break;
-      }
-    }
-  }
-
-  return ui;
+  return imported;
 }
 
 // ── Level 1: class-level purge + keyframes + font-face + element selectors ───
@@ -130,12 +165,12 @@ function isKeepableNonClassSelector(sel: string): boolean {
   return false;
 }
 
-function purgeClasses(css: string, classSafelist: Set<string>, uiClassUniverse: Set<string>): string {
+function purgeClasses(css: string, killList: Set<string>): string {
   const root = postcss.parse(css);
 
-  // Pass 1: purge style rules — only remove selectors whose classes are
-  // ALL from the UI universe and NONE are safelisted.  Selectors that
-  // contain any non-UI class (Tailwind, app) are always kept.
+  // Pass 1: remove selectors where ALL classes are on the kill-list
+  // (i.e. they belong exclusively to unused UI components).
+  // Any selector with even one class NOT on the kill-list is kept.
   root.walkRules((rule) => {
     const selectors = rule.selectors;
     const kept: string[] = [];
@@ -143,22 +178,14 @@ function purgeClasses(css: string, classSafelist: Set<string>, uiClassUniverse: 
     for (const sel of selectors) {
       const classes = extractClassesFromSelector(sel);
       if (classes.length === 0) {
-        // No class in the selector — keep only fundamental reset targets
         if (isKeepableNonClassSelector(sel)) {
           kept.push(sel);
         }
         continue;
       }
 
-      // If any class is NOT a UI class → keep (it's app/Tailwind CSS)
-      const hasNonUIClass = classes.some((c) => !uiClassUniverse.has(c));
-      if (hasNonUIClass) {
-        kept.push(sel);
-        continue;
-      }
-
-      // All classes are UI classes — keep only if at least one is safelisted
-      if (classes.some((c) => classSafelist.has(c))) {
+      // Keep if ANY class is not on the kill-list
+      if (classes.some((c) => !killList.has(c))) {
         kept.push(sel);
       }
     }
@@ -330,14 +357,17 @@ async function main() {
   );
   console.log(`[css-purge] Manifest loaded: ${Object.keys(manifest).length} entries`);
 
-  // 2. Scan consumer source
-  const usages = await scanConsumerSource(srcDir);
-  console.log(`[css-purge] Scanned ${srcDir}: ${usages.length} component usages`);
+  // 2. Scan consumer source for imported components
+  const importedComponents = await scanImportedComponents(srcDir);
+  console.log(`[css-purge] Imported components: ${importedComponents.size} / ${new Set(Object.keys(manifest).map(k => k.split(".")[0])).size}`);
 
-  // 3. Build safelists + UI class universe
-  const { classSafelist, attrSafelist } = buildSafelists(usages, manifest);
-  const uiClassUniverse = extractAllManifestClasses(manifest);
-  console.log(`[css-purge] UI universe: ${uiClassUniverse.size} classes, safelist: ${classSafelist.size} classes, ${attrSafelist.size} attrs`);
+  // 3. Build kill-list (classes from components never imported) + attr safelist
+  const killList = buildKillList(manifest, importedComponents);
+  console.log(`[css-purge] Kill-list: ${killList.size} classes from unused components`);
+
+  // Also scan for prop-level attr purging
+  const usages = await scanConsumerSource(srcDir);
+  const { attrSafelist } = buildSafelists(usages, manifest);
 
   // 4. Glob CSS files in dist
   const glob = new Glob("**/*.css");
@@ -352,8 +382,8 @@ async function main() {
 
     console.log(`[css-purge] Processing ${relPath} (${(originalSize / 1024).toFixed(1)} KB)`);
 
-    // Level 1: class-level purge (UI classes only)
-    let purgedCss = purgeClasses(originalCss, classSafelist, uiClassUniverse);
+    // Level 1: class-level purge (unused components only)
+    let purgedCss = purgeClasses(originalCss, killList);
     const afterL1 = Buffer.byteLength(purgedCss, "utf-8");
     console.log(`[css-purge]   L1 class purge: ${(originalSize / 1024).toFixed(1)} → ${(afterL1 / 1024).toFixed(1)} KB`);
 
