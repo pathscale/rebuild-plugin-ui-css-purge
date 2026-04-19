@@ -20,6 +20,7 @@ interface ComponentManifest {
     byProp: Record<string, string[] | Record<string, string[]>>;
   };
   attrs?: Record<string, Record<string, string>>;
+  deps?: string[];
 }
 
 type PurgeManifest = Record<string, ComponentManifest>;
