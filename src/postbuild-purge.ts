@@ -12,7 +12,7 @@
  *   Final — minification via Lightning CSS
  *
  * Usage:
- *   bunx @pathscale/rebuild-plugin-ui-css-purge \
+ *   bunx @pathscale/rsbuild-plugin-ui-css-purge \
  *     --dist dist --src src --manifest node_modules/@pathscale/ui/dist/purge-manifest.json
  */
 
@@ -39,7 +39,7 @@ function parseArgs(argv: string[]): { distDir: string; srcDir: string; manifestP
 
   if (!manifestPath) {
     console.error(
-      "Usage: bunx @pathscale/rebuild-plugin-ui-css-purge --manifest <path> [--dist <path>] [--src <path>]",
+      "Usage: bunx @pathscale/rsbuild-plugin-ui-css-purge --manifest <path> [--dist <path>] [--src <path>]",
     );
     process.exit(1);
   }

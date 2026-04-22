@@ -1,5 +1,5 @@
 {
-  "name": "@pathscale/rebuild-plugin-ui-css-purge",
+  "name": "@pathscale/rsbuild-plugin-ui-css-purge",
   "version": "0.9.0",
   "type": "module",
   "main": "dist/index.js",
@@ -11,7 +11,7 @@
     }
   },
   "bin": {
-    "rebuild-plugin-ui-css-purge": "dist/postbuild-purge.js",
+    "rsbuild-plugin-ui-css-purge": "dist/postbuild-purge.js",
     "generate-manifest": "src/generate-manifest.ts"
   },
   "files": ["dist", "src/generate-manifest.ts"],
