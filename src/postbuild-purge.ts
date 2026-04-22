@@ -123,6 +123,11 @@ function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>)
   return killList;
 }
 
+/** Convert kebab-case directory name to PascalCase component name */
+function kebabToPascal(s: string): string {
+  return s.split("-").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join("");
+}
+
 async function scanImportedComponents(srcDir: string): Promise<Set<string>> {
   const imported = new Set<string>();
   const glob = new Glob("**/*.{tsx,ts,jsx,js}");
@@ -133,19 +138,41 @@ async function scanImportedComponents(srcDir: string): Promise<Set<string>> {
     const code = await Bun.file(fullPath).text();
     if (!code.includes("@pathscale/ui")) continue;
 
-    // Match: import { Foo, Bar as Baz } from "@pathscale/ui"
-    const importRegex = /import\s*\{([^}]+)\}\s*from\s*['"]@pathscale\/ui['"]/g;
-    for (const match of code.matchAll(importRegex)) {
+    // Match barrel: import { Foo, Bar as Baz } from "@pathscale/ui"
+    const barrelRegex = /import\s*\{([^}]+)\}\s*from\s*['"]@pathscale\/ui['"]/g;
+    for (const match of code.matchAll(barrelRegex)) {
       const specifiers = match[1].split(",");
       for (const spec of specifiers) {
         const trimmed = spec.trim();
         if (trimmed.startsWith("type ")) continue;
-        // Handle "Foo as Bar" → take "Foo"
         const name = trimmed.split(/\s+as\s+/)[0].trim();
         if (name && /^[A-Z]/.test(name)) {
           imported.add(name);
         }
       }
+    }
+
+    // Match deep-path default: import Foo from "@pathscale/ui/components/foo-bar"
+    const deepDefaultRegex = /import\s+([A-Z][a-zA-Z0-9]*)\s+from\s*['"]@pathscale\/ui\/components\/([^'"]+)['"]/g;
+    for (const match of code.matchAll(deepDefaultRegex)) {
+      imported.add(match[1]);
+    }
+
+    // Match deep-path named: import { Foo, Bar } from "@pathscale/ui/components/foo-bar"
+    const deepNamedRegex = /import\s*\{([^}]+)\}\s*from\s*['"]@pathscale\/ui\/components\/([^'"]+)['"]/g;
+    for (const match of code.matchAll(deepNamedRegex)) {
+      const specifiers = match[1].split(",");
+      for (const spec of specifiers) {
+        const trimmed = spec.trim();
+        if (trimmed.startsWith("type ")) continue;
+        const name = trimmed.split(/\s+as\s+/)[0].trim();
+        if (name && /^[A-Z]/.test(name)) {
+          imported.add(name);
+        }
+      }
+      // Also add the PascalCase name from the path itself (covers sub-components)
+      const dirName = match[2].split("/")[0];
+      imported.add(kebabToPascal(dirName));
     }
   }
 
@@ -194,9 +221,15 @@ function resolveTransitiveDeps(
 
 // ── Level 1: class-level purge + keyframes + font-face + element selectors ───
 
+/** Unescape CSS identifiers: `icon-\[mdi--cog\]` → `icon-[mdi--cog]` */
+function unescapeCss(s: string): string {
+  return s.replace(/\\(.)/g, "$1");
+}
+
 function extractClassesFromSelector(selector: string): string[] {
-  const matches = selector.matchAll(/\.([a-zA-Z_-][a-zA-Z0-9_-]*)/g);
-  return [...matches].map((m) => m[1]);
+  // Match class selectors including CSS escape sequences (e.g. .icon-\[mdi--cog\])
+  const matches = selector.matchAll(/\.([a-zA-Z_-](?:[a-zA-Z0-9_-]|\\[^\s])*)/g);
+  return [...matches].map((m) => unescapeCss(m[1]));
 }
 
 // Elements that are always kept (fundamental reset targets).
