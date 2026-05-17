@@ -1,6 +1,6 @@
 {
   "name": "@pathscale/rsbuild-plugin-ui-css-purge",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +14,10 @@
     "rsbuild-plugin-ui-css-purge": "dist/postbuild-purge.js",
     "generate-manifest": "src/generate-manifest.ts"
   },
-  "files": ["dist", "src/generate-manifest.ts"],
+  "files": [
+    "dist",
+    "src/generate-manifest.ts"
+  ],
   "dependencies": {
     "@swc/core": "^1.15.24",
     "lightningcss": "^1.32.0",
