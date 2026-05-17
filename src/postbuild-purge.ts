@@ -63,7 +63,21 @@ function collectClassesFromEntry(entry: { classes: { always: string[]; byProp: R
   return result;
 }
 
-function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>): Set<string> {
+interface KillListResult {
+  killList: Set<string>;
+  /**
+   * BEM root classes of components the consumer actually uses. Used to
+   * preserve pure attribute selector rules like
+   * `[data-slot="checkbox-default-indicator--checkmark"]` that have no class
+   * reference but are still component-scoped.
+   */
+  usedBemRoots: Set<string>;
+}
+
+export function buildKillList(
+  manifest: PurgeManifest,
+  importedComponents: Set<string>,
+): KillListResult {
   // For each manifest entry, collect BEM root classes (from classes.always).
   // A class is considered a BEM-owned class of a component if it matches
   // one of its roots: exact match, root--, or root__.
@@ -100,11 +114,13 @@ function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>)
 
   const killList = new Set<string>();
   const safeClasses = new Set<string>();
+  const usedBemRoots = new Set<string>();
 
   for (const [component, classes] of componentClasses) {
     const bemRoots = componentBemRoots.get(component) ?? new Set();
     if (importedComponents.has(component)) {
       for (const cls of classes) safeClasses.add(cls);
+      for (const root of bemRoots) usedBemRoots.add(root);
     } else {
       // Only kill BEM-owned classes, not Tailwind utilities
       for (const cls of classes) {
@@ -120,7 +136,7 @@ function buildKillList(manifest: PurgeManifest, importedComponents: Set<string>)
     killList.delete(cls);
   }
 
-  return killList;
+  return { killList, usedBemRoots };
 }
 
 /** Convert kebab-case directory name to PascalCase component name */
@@ -240,7 +256,53 @@ const ALWAYS_KEEP_SELECTORS = new Set([
   ":before", ":after", "::backdrop",
 ]);
 
-function isKeepableNonClassSelector(sel: string): boolean {
+/**
+ * Extract all `[data-slot="..."]` attribute values from a selector. Handles
+ * quoted and unquoted forms (Lightning CSS strips quotes when the value is a
+ * simple identifier-like token, so post-minify CSS often looks like
+ * `[data-slot=checkbox-default-indicator--checkmark]`).
+ */
+export function extractDataSlotValues(sel: string): string[] {
+  const values: string[] = [];
+  const re = /\[data-slot=(?:"([^"]+)"|'([^']+)'|([^\]\s]+))\]/g;
+  for (const m of sel.matchAll(re)) {
+    const v = m[1] ?? m[2] ?? m[3];
+    if (v) values.push(v);
+  }
+  return values;
+}
+
+/**
+ * True when every `[data-slot="X"]` in `sel` belongs to a used component —
+ * X matches one of `usedBemRoots` as exact, or as `root-`, `root__`, `root--`
+ * prefix. Returns false when the selector has no `[data-slot]` at all
+ * (caller decides via other heuristics) or when any slot doesn't match.
+ */
+export function dataSlotsMatchUsedRoots(sel: string, usedBemRoots: Set<string>): boolean {
+  const slots = extractDataSlotValues(sel);
+  if (slots.length === 0) return false;
+  for (const slot of slots) {
+    let matched = false;
+    for (const root of usedBemRoots) {
+      if (
+        slot === root ||
+        slot.startsWith(`${root}-`) ||
+        slot.startsWith(`${root}__`) ||
+        slot.startsWith(`${root}--`)
+      ) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) return false;
+  }
+  return true;
+}
+
+export function isKeepableNonClassSelector(
+  sel: string,
+  usedBemRoots: Set<string> = new Set(),
+): boolean {
   const stripped = sel.trim();
 
   // Exact match on fundamental selectors
@@ -260,11 +322,23 @@ function isKeepableNonClassSelector(sel: string): boolean {
   // Keep [hidden] reset rules
   if (/^\[hidden/.test(stripped)) return true;
 
+  // Keep pure attribute-selector rules that target a component-scoped
+  // [data-slot="<root>..."] when the owning component is used by the consumer.
+  // Without this, base-state rules like
+  //   [data-slot="checkbox-default-indicator--checkmark"] { opacity: 0; ... }
+  // get dropped while their `data-selected=true` counterparts survive, leaving
+  // the indicator drawn at rest.
+  if (dataSlotsMatchUsedRoots(stripped, usedBemRoots)) return true;
+
   // Drop everything else: :host, :where(select...), element selectors (sub, sup, img, etc.)
   return false;
 }
 
-function purgeClasses(css: string, killList: Set<string>): string {
+export function purgeClasses(
+  css: string,
+  killList: Set<string>,
+  usedBemRoots: Set<string> = new Set(),
+): string {
   const root = postcss.parse(css);
 
   // Pass 1: remove selectors where ALL classes are on the kill-list
@@ -277,7 +351,7 @@ function purgeClasses(css: string, killList: Set<string>): string {
     for (const sel of selectors) {
       const classes = extractClassesFromSelector(sel);
       if (classes.length === 0) {
-        if (isKeepableNonClassSelector(sel)) {
+        if (isKeepableNonClassSelector(sel, usedBemRoots)) {
           kept.push(sel);
         }
         continue;
@@ -468,8 +542,9 @@ async function main() {
   console.log(`[css-purge] Transitive deps: +${transitive} → ${importedComponents.size} total used components`);
 
   // 4. Build kill-list (classes from components never imported) + attr safelist
-  const killList = buildKillList(manifest, importedComponents);
+  const { killList, usedBemRoots } = buildKillList(manifest, importedComponents);
   console.log(`[css-purge] Kill-list: ${killList.size} classes from ${totalComponents - importedComponents.size} unused components`);
+  console.log(`[css-purge] Used BEM roots: ${usedBemRoots.size} (preserves [data-slot] rules for used components)`);
 
   // Also scan for prop-level attr purging
   const usages = await scanConsumerSource(srcDir);
@@ -489,7 +564,7 @@ async function main() {
     console.log(`[css-purge] Processing ${relPath} (${(originalSize / 1024).toFixed(1)} KB)`);
 
     // Level 1: class-level purge (unused components only)
-    let purgedCss = purgeClasses(originalCss, killList);
+    let purgedCss = purgeClasses(originalCss, killList, usedBemRoots);
     const afterL1 = Buffer.byteLength(purgedCss, "utf-8");
     console.log(`[css-purge]   L1 class purge: ${(originalSize / 1024).toFixed(1)} → ${(afterL1 / 1024).toFixed(1)} KB`);
 
@@ -516,4 +591,6 @@ async function main() {
   console.log(`\n[css-purge] Total: ${(totalBefore / 1024).toFixed(1)} → ${(totalAfter / 1024).toFixed(1)} KB (${((1 - totalAfter / totalBefore) * 100).toFixed(1)}% reduction)`);
 }
 
-main();
+if (import.meta.main) {
+  main();
+}
